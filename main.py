@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime
 from src.auth import get_credentials, CREDS_PATH
 from src.processor import sync_sheets, get_last_sync_time
+from src.menu_configs import list_available_menus
 from src.scheduler import start_scheduler, stop_scheduler_func, get_scheduler_status
 
 logging.basicConfig(
@@ -50,30 +51,57 @@ def setup():
         sys.exit(1)
 
 @cli.command()
-def sync():
-    click.echo("Starting manual sync...")
+@click.option('--menu', '-m', type=click.Choice(['thca', 'titan', 'all']), default='thca',
+              help='Which menu to sync (default: thca)')
+def sync(menu):
+    click.echo(f"Starting manual sync for {menu}...")
     
     if not CREDS_PATH.exists():
         click.echo("L Please run 'python main.py setup' first")
         sys.exit(1)
     
-    success = sync_sheets()
-    if success:
-        click.echo("Sync completed successfully!")
+    if menu == 'all':
+        # Sync all menus
+        all_success = True
+        for menu_type in list_available_menus():
+            click.echo(f"\nSyncing {menu_type} menu...")
+            success = sync_sheets(menu_type)
+            if success:
+                click.echo(f"✓ {menu_type} sync completed successfully!")
+            else:
+                click.echo(f"✗ {menu_type} sync failed. Check logs for details.")
+                all_success = False
+        
+        if not all_success:
+            sys.exit(1)
     else:
-        click.echo("L Sync failed. Check logs for details.")
-        sys.exit(1)
+        success = sync_sheets(menu)
+        if success:
+            click.echo("Sync completed successfully!")
+        else:
+            click.echo("L Sync failed. Check logs for details.")
+            sys.exit(1)
 
 @cli.command()
-def status():
+@click.option('--menu', '-m', type=click.Choice(['thca', 'titan', 'all']), default='all',
+              help='Which menu status to check (default: all)')
+def status(menu):
     click.echo("Checking sync status...")
     click.echo("")
     
-    last_sync = get_last_sync_time()
-    if last_sync:
-        click.echo(f"Last sync: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+    if menu == 'all':
+        for menu_type in list_available_menus():
+            last_sync = get_last_sync_time(menu_type)
+            if last_sync:
+                click.echo(f"{menu_type.upper()} last sync: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                click.echo(f"{menu_type.upper()} last sync: Never")
     else:
-        click.echo("Last sync: Never")
+        last_sync = get_last_sync_time(menu)
+        if last_sync:
+            click.echo(f"Last sync: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            click.echo("Last sync: Never")
     
     scheduler_status = get_scheduler_status()
     if scheduler_status['running']:
@@ -85,15 +113,17 @@ def status():
         click.echo("Scheduler: Not running")
 
 @cli.command(name='start-scheduler')
-def start_scheduler_cmd():
-    click.echo("Starting automatic scheduler...")
+@click.option('--menu', '-m', type=click.Choice(['thca', 'titan', 'all']), default='all',
+              help='Which menu(s) to sync on schedule (default: all)')
+def start_scheduler_cmd(menu):
+    click.echo(f"Starting automatic scheduler for {menu} menu(s)...")
     
     if not CREDS_PATH.exists():
         click.echo("L Please run 'python main.py setup' first")
         sys.exit(1)
     
-    if start_scheduler():
-        click.echo("Scheduler started - will sync every hour")
+    if start_scheduler(menu):
+        click.echo(f"Scheduler started - will sync {menu} menu(s) every hour")
         click.echo("Run 'python main.py status' to check next sync time")
         
         try:

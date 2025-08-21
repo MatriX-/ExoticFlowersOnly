@@ -18,6 +18,7 @@ pip-delete-this-directory.txt
 config/credentials.json
 config/token.pickle
 logs/
+requirements/
 *.log
 
 .DS_Store
@@ -33,3 +34,4 @@ build/
 __pycache__/
 *.py[cod]
 *$py.class
+CLAUDE.md

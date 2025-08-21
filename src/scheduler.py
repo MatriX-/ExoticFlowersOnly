@@ -7,23 +7,31 @@ import signal
 from pathlib import Path
 from datetime import datetime, timedelta
 from src.processor import sync_sheets
+from src.menu_configs import list_available_menus
 
 logger = logging.getLogger(__name__)
 PID_FILE = Path('logs/scheduler.pid')
 scheduler_thread = None
 stop_scheduler = threading.Event()
+scheduled_menu_type = 'all'  # Track which menu(s) to sync
 
 def scheduled_sync():
     logger.info(f"Running scheduled sync at {datetime.now()}")
-    sync_sheets()
+    if scheduled_menu_type == 'all':
+        for menu_type in list_available_menus():
+            logger.info(f"Syncing {menu_type} menu...")
+            sync_sheets(menu_type)
+    else:
+        sync_sheets(scheduled_menu_type)
 
-def start_scheduler():
-    global scheduler_thread
+def start_scheduler(menu_type='all'):
+    global scheduler_thread, scheduled_menu_type
     
     if scheduler_thread and scheduler_thread.is_alive():
         logger.warning("Scheduler is already running")
         return False
     
+    scheduled_menu_type = menu_type
     stop_scheduler.clear()
     
     schedule.clear()
