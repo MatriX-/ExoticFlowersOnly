@@ -527,33 +527,33 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                 }
             })
         else:
-            # Original behavior for non-Titan menus
-            # Part 1: rows 0..1 (exclude logo row index 1)
+            # For THCA menu: Fill ALL header rows with brand blue (up to column I)
+            # Rows 1-8 - fill entire header area with brand blue up to column I
             requests.append({
                 'repeatCell': {
                     'range': {
                         'sheetId': target_sheet_id_num,
                         'startRowIndex': 0,
-                        'endRowIndex': 1,
+                        'endRowIndex': header_rows,  # All header rows (1-8)
                         'startColumnIndex': 0,
-                        'endColumnIndex': 26
+                        'endColumnIndex': 9  # Stop at column I (index 8 + 1)
                     },
                     'cell': {
                         'userEnteredFormat': {
-                            'backgroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}
+                            'backgroundColor': {'red': 0.62, 'green': 0.88, 'blue': 0.91}
                         }
                     },
                     'fields': 'userEnteredFormat.backgroundColor'
                 }
             })
-            # Part 2: rows 6..header_rows (skip contact rows 3..5)
+            # Fill the rest with white (columns J onwards)
             requests.append({
                 'repeatCell': {
                     'range': {
                         'sheetId': target_sheet_id_num,
-                        'startRowIndex': 6,
+                        'startRowIndex': 0,
                         'endRowIndex': header_rows,
-                        'startColumnIndex': 0,
+                        'startColumnIndex': 9,  # From column J onwards
                         'endColumnIndex': 26
                     },
                     'cell': {
@@ -673,6 +673,21 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                             break
             
             target_col = 0
+            
+            # For Titan menu: Extract hyperlink from Column C to use in Column A
+            column_c_url = None
+            column_c_display_text = None
+            if is_titan_menu and len(row['values']) > 2:
+                # Check column C (index 2) for hyperlinks
+                c_url, c_display_text, c_formula = extract_link_and_text(row['values'][2])
+                if c_url:
+                    column_c_url = c_url
+                    # Use column A's text as display text, not column C's
+                    if len(row['values']) > 0:
+                        column_c_display_text = _cell_plain_text(row['values'][0]) or c_display_text
+                    else:
+                        column_c_display_text = c_display_text
+                    logger.info(f"Row {row_index+1}: Found hyperlink in Col C to move to Col A: {c_url}")
 
                     
             for source_col, source_cell in enumerate(row['values']):
@@ -687,14 +702,21 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                 def _escape_for_formula(text: str) -> str:
                     return text.replace('"', '""') if isinstance(text, str) else text
 
-                # Check for hyperlinks FIRST before any other processing
+                # Check for hyperlinks in the current cell
                 url, display_text, existing_formula = extract_link_and_text(source_cell)
                 
-                # Log hyperlink detection for debugging  
-                if source_col == 2:  # Column C
-                    logger.debug(f"Row {row_index+1}, Col C: Checking for hyperlinks in cell")
-                    if url:
-                        logger.info(f"Row {row_index+1}, Col C: Found hyperlink: {url}")
+                # For Titan menu: Special handling for columns A and C
+                if is_titan_menu:
+                    if source_col == 0 and column_c_url:  # Column A - add hyperlink from C
+                        url = column_c_url
+                        display_text = column_c_display_text
+                        existing_formula = None
+                        logger.info(f"Row {row_index+1}, Col A: Using hyperlink from Col C")
+                    elif source_col == 2:  # Column C - remove hyperlink
+                        url = None
+                        display_text = None
+                        existing_formula = None
+                        logger.debug(f"Row {row_index+1}, Col C: Removing hyperlink, keeping as price")
 
                 # Apply category upcharge for configured price column
                 # But ONLY if there's no hyperlink (hyperlinks take precedence)
