@@ -1,4 +1,20 @@
 # Menu configurations for different source sheets
+from datetime import datetime
+
+# Consolidated sheet configuration
+CONSOLIDATED_SHEET_CONFIG = {
+    'name_template': 'Exotic Flowers Only Menu (Updated {date})',
+    'cache_file': 'logs/consolidated_sheet_id.txt',
+    'tabs': {
+        'thca': 'THCA',
+        'titan': 'Titan Botanicals'
+    }
+}
+
+def get_consolidated_sheet_name():
+    """Generate the consolidated sheet name with current date."""
+    date_str = datetime.now().strftime("%B %-d")  # e.g., "August 21"
+    return CONSOLIDATED_SHEET_CONFIG['name_template'].format(date=date_str)
 
 MENU_CONFIGS = {
     'thca': {

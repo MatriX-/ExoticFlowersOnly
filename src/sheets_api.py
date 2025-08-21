@@ -1,5 +1,7 @@
 import logging
 import json
+import os
+from datetime import datetime
 from typing import Optional, List, Any, Dict
 from googleapiclient.errors import HttpError
 from src.auth import get_sheets_service, get_drive_service
@@ -168,7 +170,7 @@ def copy_source_sheet(menu_config: dict) -> dict:
         logger.error(f"Error copying source sheet: {e}")
         raise
 
-def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_config: dict):
+def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_config: dict, menu_type: str = None, use_consolidated: bool = False):
     try:
         sheets_service = get_sheets_service()
         sheet_data = source_data['sheet_data']
@@ -184,18 +186,33 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
         # Row data is already adjusted for skip_rows from the API call
         row_data = source_grid_data.get('rowData', [])
         
-        # Discover target sheetId (do not assume 0)
-        target_metadata = sheets_service.spreadsheets().get(
-            spreadsheetId=target_sheet_id,
-            fields='sheets(properties(sheetId,title))'
-        ).execute()
-        target_sheet_id_num = target_metadata['sheets'][0]['properties']['sheetId']
-
-        # Clear target sheet completely
-        sheets_service.spreadsheets().values().clear(
-            spreadsheetId=target_sheet_id,
-            range='A:ZZ'
-        ).execute()
+        # Discover target sheetId
+        if use_consolidated and menu_type:
+            # For consolidated sheet, get the specific tab ID
+            target_sheet_id_num = get_sheet_tab_id(target_sheet_id, menu_type)
+            if target_sheet_id_num is None:
+                raise ValueError(f"Could not get or create tab for menu type: {menu_type}")
+            
+            # Clear only this tab's content
+            from src.menu_configs import CONSOLIDATED_SHEET_CONFIG
+            tab_name = CONSOLIDATED_SHEET_CONFIG['tabs'][menu_type]
+            sheets_service.spreadsheets().values().clear(
+                spreadsheetId=target_sheet_id,
+                range=f"'{tab_name}'!A:ZZ"
+            ).execute()
+        else:
+            # Original behavior for individual sheets
+            target_metadata = sheets_service.spreadsheets().get(
+                spreadsheetId=target_sheet_id,
+                fields='sheets(properties(sheetId,title))'
+            ).execute()
+            target_sheet_id_num = target_metadata['sheets'][0]['properties']['sheetId']
+            
+            # Clear target sheet completely
+            sheets_service.spreadsheets().values().clear(
+                spreadsheetId=target_sheet_id,
+                range='A:ZZ'
+            ).execute()
         
         # Build complete cell updates including data, formatting, and hyperlinks
         requests = []
@@ -844,3 +861,218 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         raise
+
+# Consolidated sheet functions
+
+def get_consolidated_sheet_id() -> Optional[str]:
+    """Get the ID of the consolidated sheet if it exists."""
+    from src.menu_configs import CONSOLIDATED_SHEET_CONFIG
+    
+    cache_file = CONSOLIDATED_SHEET_CONFIG['cache_file']
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as f:
+            return f.read().strip()
+    return None
+
+def save_consolidated_sheet_id(sheet_id: str):
+    """Save the consolidated sheet ID to cache."""
+    from src.menu_configs import CONSOLIDATED_SHEET_CONFIG
+    
+    os.makedirs('logs', exist_ok=True)
+    cache_file = CONSOLIDATED_SHEET_CONFIG['cache_file']
+    with open(cache_file, 'w') as f:
+        f.write(sheet_id)
+
+def verify_consolidated_sheet(sheet_id: str) -> bool:
+    """Verify that the consolidated sheet exists and is accessible."""
+    try:
+        sheets_service = get_sheets_service()
+        metadata = sheets_service.spreadsheets().get(
+            spreadsheetId=sheet_id,
+            fields='properties.title'
+        ).execute()
+        return True
+    except HttpError:
+        return False
+
+def create_consolidated_sheet() -> str:
+    """Create a new consolidated spreadsheet with tabs for each menu."""
+    from src.menu_configs import get_consolidated_sheet_name, CONSOLIDATED_SHEET_CONFIG
+    
+    try:
+        sheets_service = get_sheets_service()
+        
+        # Create spreadsheet with initial tab
+        spreadsheet = {
+            'properties': {
+                'title': get_consolidated_sheet_name()
+            },
+            'sheets': [
+                {
+                    'properties': {
+                        'title': CONSOLIDATED_SHEET_CONFIG['tabs']['thca'],
+                        'index': 0
+                    }
+                }
+            ]
+        }
+        
+        result = sheets_service.spreadsheets().create(
+            body=spreadsheet,
+            fields='spreadsheetId,sheets(properties(sheetId,title))'
+        ).execute()
+        
+        sheet_id = result.get('spreadsheetId')
+        logger.info(f"Created new consolidated spreadsheet with ID: {sheet_id}")
+        
+        # Add second tab
+        requests = [{
+            'addSheet': {
+                'properties': {
+                    'title': CONSOLIDATED_SHEET_CONFIG['tabs']['titan'],
+                    'index': 1
+                }
+            }
+        }]
+        
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={'requests': requests}
+        ).execute()
+        
+        logger.info("Added Titan Botanicals tab to consolidated sheet")
+        
+        # Save the sheet ID
+        save_consolidated_sheet_id(sheet_id)
+        
+        # Clean up old cache files
+        cleanup_old_cache_files()
+        
+        return sheet_id
+        
+    except HttpError as e:
+        logger.error(f"Error creating consolidated spreadsheet: {e}")
+        raise
+
+def get_or_create_consolidated_sheet() -> str:
+    """Get existing consolidated sheet or create a new one."""
+    # Check cache
+    sheet_id = get_consolidated_sheet_id()
+    
+    if sheet_id and verify_consolidated_sheet(sheet_id):
+        logger.info(f"Using existing consolidated sheet: {sheet_id}")
+        return sheet_id
+    
+    # Create new sheet
+    return create_consolidated_sheet()
+
+def update_consolidated_sheet_title(sheet_id: str):
+    """Update the title of the consolidated sheet with current date."""
+    from src.menu_configs import get_consolidated_sheet_name
+    
+    try:
+        sheets_service = get_sheets_service()
+        
+        requests = [{
+            'updateSpreadsheetProperties': {
+                'properties': {
+                    'title': get_consolidated_sheet_name()
+                },
+                'fields': 'title'
+            }
+        }]
+        
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={'requests': requests}
+        ).execute()
+        
+        logger.info(f"Updated sheet title with current date")
+        
+    except HttpError as e:
+        logger.error(f"Error updating sheet title: {e}")
+
+def get_sheet_tab_id(sheet_id: str, menu_type: str) -> Optional[int]:
+    """Get the sheetId for a specific tab in the consolidated sheet."""
+    from src.menu_configs import CONSOLIDATED_SHEET_CONFIG
+    
+    try:
+        sheets_service = get_sheets_service()
+        
+        metadata = sheets_service.spreadsheets().get(
+            spreadsheetId=sheet_id,
+            fields='sheets(properties(sheetId,title))'
+        ).execute()
+        
+        tab_name = CONSOLIDATED_SHEET_CONFIG['tabs'].get(menu_type)
+        if not tab_name:
+            logger.error(f"Unknown menu type: {menu_type}")
+            return None
+        
+        for sheet in metadata.get('sheets', []):
+            if sheet['properties']['title'] == tab_name:
+                return sheet['properties']['sheetId']
+        
+        # Tab doesn't exist, create it
+        return create_sheet_tab(sheet_id, menu_type)
+        
+    except HttpError as e:
+        logger.error(f"Error getting sheet tab ID: {e}")
+        return None
+
+def create_sheet_tab(sheet_id: str, menu_type: str) -> Optional[int]:
+    """Create a new tab in the consolidated sheet."""
+    from src.menu_configs import CONSOLIDATED_SHEET_CONFIG
+    
+    try:
+        sheets_service = get_sheets_service()
+        
+        tab_name = CONSOLIDATED_SHEET_CONFIG['tabs'].get(menu_type)
+        if not tab_name:
+            logger.error(f"Unknown menu type: {menu_type}")
+            return None
+        
+        # Determine index based on menu type
+        index = 0 if menu_type == 'thca' else 1
+        
+        requests = [{
+            'addSheet': {
+                'properties': {
+                    'title': tab_name,
+                    'index': index
+                }
+            }
+        }]
+        
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={'requests': requests}
+        ).execute()
+        
+        # Get the new sheet ID from the response
+        for reply in result.get('replies', []):
+            if 'addSheet' in reply:
+                new_sheet_id = reply['addSheet']['properties']['sheetId']
+                logger.info(f"Created new tab '{tab_name}' with ID: {new_sheet_id}")
+                return new_sheet_id
+        
+        return None
+        
+    except HttpError as e:
+        logger.error(f"Error creating sheet tab: {e}")
+        return None
+
+def cleanup_old_cache_files():
+    """Remove old individual sheet cache files after migration."""
+    old_files = [
+        'logs/target_sheet_id_thca_menu.txt',
+        'logs/target_sheet_id_titan_botanicals_menu.txt'
+    ]
+    
+    for file_path in old_files:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.info(f"Removed old cache file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Could not remove {file_path}: {e}")

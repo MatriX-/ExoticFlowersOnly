@@ -5,7 +5,9 @@ from src.sheets_api import (
     get_target_sheet_id,
     create_target_sheet,
     copy_source_sheet,
-    process_and_update_sheet
+    process_and_update_sheet,
+    get_or_create_consolidated_sheet,
+    update_consolidated_sheet_title
 )
 from src.menu_configs import get_menu_config
 
@@ -22,15 +24,22 @@ def sync_sheets(menu_type='thca'):
         logger.info("Copying source sheet data...")
         source_data = copy_source_sheet(menu_config)
         
-        target_sheet_id = get_target_sheet_id(menu_config)
-        if not target_sheet_id:
-            logger.info("Target sheet not found, creating new one...")
-            target_sheet_id = create_target_sheet(menu_config)
-        else:
-            logger.info(f"Found existing target sheet: {target_sheet_id}")
+        # Use consolidated sheet instead of individual sheets
+        logger.info("Getting or creating consolidated sheet...")
+        target_sheet_id = get_or_create_consolidated_sheet()
         
-        logger.info("Processing and updating target sheet...")
-        process_and_update_sheet(source_data, target_sheet_id, menu_config)
+        logger.info(f"Processing and updating consolidated sheet tab for {menu_config['name']}...")
+        process_and_update_sheet(
+            source_data, 
+            target_sheet_id, 
+            menu_config,
+            menu_type=menu_type,
+            use_consolidated=True
+        )
+        
+        # Update the sheet title with current date
+        logger.info("Updating consolidated sheet title with current date...")
+        update_consolidated_sheet_title(target_sheet_id)
         
         last_sync_file.parent.mkdir(parents=True, exist_ok=True)
         with open(last_sync_file, 'w') as f:
