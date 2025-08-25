@@ -17,7 +17,6 @@ pip-delete-this-directory.txt
 
 config/credentials.json
 config/token.pickle
-logs/
 requirements/
 *.log
 
