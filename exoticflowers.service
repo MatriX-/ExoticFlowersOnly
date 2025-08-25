@@ -1,0 +1,29 @@
+[Unit]
+Description=Exotic Flowers Google Sheets Sync Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+WorkingDirectory=/Users/stephen/exoticflowers
+Environment=PATH=/Users/stephen/exoticflowers/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/Users/stephen/exoticflowers/venv/bin/python main.py start-scheduler
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=exoticflowers
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

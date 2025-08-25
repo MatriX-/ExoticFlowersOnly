@@ -208,11 +208,41 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
             ).execute()
             target_sheet_id_num = target_metadata['sheets'][0]['properties']['sheetId']
             
-            # Clear target sheet completely
+            # Clear target sheet completely - both values AND formatting
             sheets_service.spreadsheets().values().clear(
                 spreadsheetId=target_sheet_id,
                 range='A:ZZ'
             ).execute()
+            
+            # Also clear all formatting to remove background colors
+            clear_format_request = {
+                'requests': [{
+                    'unmergeCells': {
+                        'range': {
+                            'sheetId': target_sheet_id_num
+                        }
+                    }
+                }, {
+                    'repeatCell': {
+                        'range': {
+                            'sheetId': target_sheet_id_num
+                        },
+                        'cell': {
+                            'userEnteredFormat': {}
+                        },
+                        'fields': 'userEnteredFormat'
+                    }
+                }]
+            }
+            
+            try:
+                sheets_service.spreadsheets().batchUpdate(
+                    spreadsheetId=target_sheet_id,
+                    body=clear_format_request
+                ).execute()
+                logger.info("Cleared all formatting including background colors from target sheet")
+            except HttpError as e:
+                logger.warning(f"Could not clear formatting: {e}")
         
         # Build complete cell updates including data, formatting, and hyperlinks
         requests = []
@@ -287,6 +317,8 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
 
         # Category upcharges from config
         category_upcharge = menu_config.get('category_upcharge', {})
+        conditional_pricing = menu_config.get('conditional_pricing', {})
+        category_name_mapping = menu_config.get('category_name_mapping', {})
         columns_to_remove = menu_config.get('columns_to_remove', [0, 5, 6])
         price_column = menu_config.get('price_column', 7)
         category_column = menu_config.get('category_column', 1)
@@ -630,6 +662,54 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
             if 'values' not in row:
                 continue
             
+            # Check if row has a valid price in the price column
+            has_valid_price = False
+            if len(row['values']) > price_column:
+                price_cell = row['values'][price_column]
+                if price_cell and isinstance(price_cell, dict):
+                    # Check for price value in userEnteredValue
+                    if 'userEnteredValue' in price_cell:
+                        uev = price_cell['userEnteredValue']
+                        if isinstance(uev, dict):
+                            # Check for numeric value
+                            if 'numberValue' in uev:
+                                has_valid_price = True
+                            # Check for string value that could be a price
+                            elif 'stringValue' in uev:
+                                import re
+                                price_str = str(uev['stringValue']).strip()
+                                # Check if string contains numbers (potential price)
+                                if price_str and re.search(r'\d', price_str):
+                                    has_valid_price = True
+                            # Check for formula (like HYPERLINK)
+                            elif 'formulaValue' in uev:
+                                # Skip rows with formulas in price column (likely hyperlinks)
+                                has_valid_price = False
+                    # Also check formattedValue as fallback
+                    elif 'formattedValue' in price_cell:
+                        formatted = str(price_cell.get('formattedValue', '')).strip()
+                        if formatted and formatted != '0':
+                            import re
+                            if re.search(r'\d', formatted):
+                                has_valid_price = True
+            
+            # Check if this is a category header (has background color)
+            is_category_header = False
+            if row['values'] and len(row['values']) > 0:
+                first_cell = row['values'][0]
+                if 'userEnteredFormat' in first_cell or 'effectiveFormat' in first_cell:
+                    format_to_check = first_cell.get('userEnteredFormat') or first_cell.get('effectiveFormat', {})
+                    if 'backgroundColor' in format_to_check:
+                        bg_color = format_to_check['backgroundColor']
+                        # Check if it has a non-white background
+                        if bg_color and not (bg_color.get('red', 0) == 1 and bg_color.get('green', 0) == 1 and bg_color.get('blue', 0) == 1):
+                            is_category_header = True
+            
+            # Skip rows without valid prices unless they are category headers
+            if not has_valid_price and not is_category_header:
+                logger.debug(f"Row {row_index+1}: Skipping row without valid price in column {price_column+1}")
+                continue
+            
             # Apply filtering if enabled
             if filter_enabled and filter_keywords:
                 # Special case: preserve the first row after skip_rows if configured (e.g., column headers)
@@ -639,19 +719,6 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                     # Don't apply filtering, just include this row
                     pass
                 else:
-                    # Check if this row is a category header (has background color, typically yellow)
-                    is_category_header = False
-                    if row['values'] and len(row['values']) > 0:
-                        first_cell = row['values'][0]
-                        if 'userEnteredFormat' in first_cell or 'effectiveFormat' in first_cell:
-                            # Check for background color (category headers have colored backgrounds)
-                            format_to_check = first_cell.get('userEnteredFormat') or first_cell.get('effectiveFormat', {})
-                            if 'backgroundColor' in format_to_check:
-                                bg_color = format_to_check['backgroundColor']
-                                # Check if it has a non-white background (white is 1,1,1)
-                                if bg_color and not (bg_color.get('red', 0) == 1 and bg_color.get('green', 0) == 1 and bg_color.get('blue', 0) == 1):
-                                    is_category_header = True
-                
                     if is_category_header:
                         # This is a category header - check if it contains our keywords
                         if row_contains_keywords(row['values'], filter_keywords):
@@ -675,19 +742,41 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                     else:
                         logger.info(f"Row {row_index+1}: Product row in kept category - including")
             
-            # Set current_category for price adjustments
-            current_category = current_price_category
+            # Don't reset current_category here - it should persist from category headers
+            # Only update it when we find a new category header
             
-            if not filter_enabled:
-                # Original category detection for non-filtered menus
+            if not filter_enabled and is_category_header:
+                # Only detect category on category header rows
                 target_col = 0
                 if len(row['values']) > category_column:
                     type_text = _normalize(_cell_plain_text(row['values'][category_column]))
-                    for cat_name in category_upcharge.keys():
-                        if cat_name in type_text:
-                            current_category = cat_name
-                            logger.info(f"Row {row_index+1}: Detected category '{cat_name}' from TYPE column")
+                    
+                    # First check original category names for mapping
+                    detected_original = None
+                    for old_name in category_name_mapping.keys():
+                        if old_name in type_text:
+                            detected_original = old_name
                             break
+                    
+                    # Map to the pricing category
+                    if detected_original:
+                        # Map the original category to the new category for pricing
+                        if detected_original == 'indoor exotics':
+                            current_category = 'exotic a+++'
+                        elif detected_original == 'commercial ins':
+                            current_category = 'indoor exotics'
+                        elif detected_original == 'high end deps':
+                            current_category = 'high end light assist'
+                        elif detected_original == 'standard deps':
+                            current_category = 'light assist'
+                        logger.info(f"Row {row_index+1}: Detected original category '{detected_original}', using pricing category '{current_category}'")
+                    else:
+                        # Check for categories not in the mapping (like smalls)
+                        for cat_name in category_upcharge.keys():
+                            if cat_name in type_text:
+                                current_category = cat_name
+                                logger.info(f"Row {row_index+1}: Detected category '{cat_name}' from TYPE column")
+                                break
             
             target_col = 0
             
@@ -714,6 +803,12 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                 
                 # Build complete cell data
                 new_cell = {}
+                
+                # Check if this cell contains a category name that needs mapping
+                original_value = None
+                if 'userEnteredValue' in source_cell and isinstance(source_cell['userEnteredValue'], dict):
+                    if 'stringValue' in source_cell['userEnteredValue']:
+                        original_value = source_cell['userEnteredValue']['stringValue']
 
                 # Helper to escape quotes for formulas
                 def _escape_for_formula(text: str) -> str:
@@ -736,27 +831,59 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                         logger.debug(f"Row {row_index+1}, Col C: Removing hyperlink, keeping as price")
 
                 # Apply category upcharge for configured price column
+                # IMPORTANT: source_col is the ORIGINAL column index (before removal)
                 # But ONLY if there's no hyperlink (hyperlinks take precedence)
-                if source_col == price_column and not url and not existing_formula and 'userEnteredValue' in source_cell and isinstance(source_cell['userEnteredValue'], dict):
-                    uev = source_cell['userEnteredValue']
-                    base_price = None
-                    if 'numberValue' in uev:
-                        base_price = float(uev['numberValue'])
-                    elif 'stringValue' in uev:
-                        import re
-                        cleaned = re.sub(r'[^0-9.\-]', '', str(uev['stringValue']))
-                        try:
-                            base_price = float(cleaned) if cleaned else None
-                        except ValueError:
-                            base_price = None
-                    
-                    if base_price is not None:
-                        if current_category in category_upcharge:
-                            upcharge = float(category_upcharge[current_category])
-                            adjusted = base_price + upcharge
-                            new_cell['userEnteredValue'] = {'numberValue': adjusted}
-                            price_adjust_count += 1
-                            logger.info(f"Row {row_index+1}: Adjusting price ${base_price} + ${upcharge} = ${adjusted} for category '{current_category}'")
+                if source_col == price_column:
+                    logger.debug(f"Row {row_index+1}, Col {source_col}: This is the price column, checking for price...")
+                    logger.debug(f"  - Has URL: {url is not None}, Has formula: {existing_formula is not None}")
+                    logger.debug(f"  - Current category: {current_category}")
+                    if not url and not existing_formula and 'userEnteredValue' in source_cell and isinstance(source_cell['userEnteredValue'], dict):
+                        uev = source_cell['userEnteredValue']
+                        base_price = None
+                        if 'numberValue' in uev:
+                            base_price = float(uev['numberValue'])
+                            logger.debug(f"  - Found numeric price: ${base_price}")
+                        elif 'stringValue' in uev:
+                            import re
+                            cleaned = re.sub(r'[^0-9.\-]', '', str(uev['stringValue']))
+                            try:
+                                base_price = float(cleaned) if cleaned else None
+                                logger.debug(f"  - Found string price: ${base_price}")
+                            except ValueError:
+                                base_price = None
+                                logger.debug(f"  - Could not parse price from string: {uev['stringValue']}")
+                        
+                        if base_price is not None and current_category:
+                            adjusted_price = None
+                            
+                            # Check if this category has conditional pricing
+                            if current_category in conditional_pricing:
+                                rules = conditional_pricing[current_category]
+                                threshold = rules.get('threshold', 0)
+                                
+                                if 'under_threshold_price' in rules and base_price <= threshold:
+                                    # Set to fixed price if under threshold
+                                    adjusted_price = rules['under_threshold_price']
+                                    logger.info(f"Row {row_index+1}: Setting price to ${adjusted_price} (was ${base_price}) for '{current_category}' (under ${threshold})")
+                                elif 'under_threshold_markup' in rules and base_price <= threshold:
+                                    # Add markup if under threshold
+                                    adjusted_price = base_price + rules['under_threshold_markup']
+                                    logger.info(f"Row {row_index+1}: Adjusting price ${base_price} + ${rules['under_threshold_markup']} = ${adjusted_price} for '{current_category}' (under ${threshold})")
+                                elif 'over_threshold_markup' in rules and base_price > threshold:
+                                    # Add markup if over threshold
+                                    adjusted_price = base_price + rules['over_threshold_markup']
+                                    logger.info(f"Row {row_index+1}: Adjusting price ${base_price} + ${rules['over_threshold_markup']} = ${adjusted_price} for '{current_category}' (over ${threshold})")
+                            # Check if this category has a simple upcharge
+                            elif current_category in category_upcharge:
+                                upcharge_value = category_upcharge[current_category]
+                                if upcharge_value != 'conditional':  # Skip if marked as conditional but not defined
+                                    upcharge = float(upcharge_value)
+                                    adjusted_price = base_price + upcharge
+                                    logger.info(f"Row {row_index+1}: Adjusting price ${base_price} + ${upcharge} = ${adjusted_price} for category '{current_category}'")
+                            
+                            if adjusted_price is not None:
+                                new_cell['userEnteredValue'] = {'numberValue': adjusted_price}
+                                price_adjust_count += 1
 
                 # Set the hyperlink or regular value if not already set by price adjustment
                 if 'userEnteredValue' not in new_cell:
@@ -769,22 +896,49 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                         new_cell['userEnteredValue'] = {'formulaValue': formula}
                         hyperlink_count += 1
                     elif 'userEnteredValue' in source_cell:
-                        # Copy regular value (text, number, formula, etc.)
-                        new_cell['userEnteredValue'] = source_cell['userEnteredValue']
+                        # Check if we need to map category names
+                        if original_value and source_col == category_column and is_category_header:
+                            # Check if this category name needs to be mapped
+                            normalized_value = _normalize(original_value)
+                            mapped_name = None
+                            for old_name, new_name in category_name_mapping.items():
+                                if old_name in normalized_value:
+                                    mapped_name = new_name
+                                    logger.info(f"Row {row_index+1}: Mapping category name '{original_value}' to '{mapped_name}'")
+                                    break
+                            
+                            if mapped_name:
+                                new_cell['userEnteredValue'] = {'stringValue': mapped_name}
+                            else:
+                                # Copy regular value
+                                new_cell['userEnteredValue'] = source_cell['userEnteredValue']
+                        else:
+                            # Copy regular value (text, number, formula, etc.)
+                            new_cell['userEnteredValue'] = source_cell['userEnteredValue']
 
-                # Copy formatting
+                # Copy formatting, but handle background colors carefully
                 if 'userEnteredFormat' in source_cell:
-                    new_cell['userEnteredFormat'] = source_cell['userEnteredFormat']
+                    format_copy = source_cell['userEnteredFormat'].copy()
+                    
+                    # Remove background colors from all cells EXCEPT category headers
+                    # Category headers should keep their background to maintain visual separation
+                    if not is_category_header:
+                        # For regular rows (non-category headers), remove any background color
+                        if 'backgroundColor' in format_copy:
+                            del format_copy['backgroundColor']
+                    
+                    # Apply the cleaned format if there's still formatting to apply
+                    if format_copy:
+                        new_cell['userEnteredFormat'] = format_copy
                 
                 # Add cell update request (offset by header rows)
-                # Use target_row_index for filtered output to avoid gaps
-                actual_row_index = target_row_index if filter_enabled else row_index
+                # Always use target_row_index to avoid gaps when skipping rows
                 requests.append({
                     'updateCells': {
                         'range': {
                             'sheetId': target_sheet_id_num,
-                            'startRowIndex': actual_row_index + header_rows,
-                            'endRowIndex': actual_row_index + header_rows + 1,
+                            'startRowIndex': target_row_index + header_rows,
+                            'endRowIndex': target_row_index + header_rows + 1,
                             'startColumnIndex': target_col,
                             'endColumnIndex': target_col + 1
                         },
@@ -797,9 +951,8 @@ def process_and_update_sheet(source_data: dict, target_sheet_id: str, menu_confi
                 
                 target_col += 1
             
-            # Increment target row index after processing a kept row
-            if filter_enabled:
-                target_row_index += 1
+            # Always increment target row index after processing a kept row
+            target_row_index += 1
         
         # Apply column widths
         if 'columnMetadata' in source_grid_data:

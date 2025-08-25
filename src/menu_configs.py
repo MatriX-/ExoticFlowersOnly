@@ -19,7 +19,7 @@ def get_consolidated_sheet_name():
 MENU_CONFIGS = {
     'thca': {
         'name': 'THCA Menu',
-        'source_sheet_id': '17OnrxwCf7EYjY27QM1FokRHmjkERYWSMSDg5sxscc7c',
+        'source_sheet_id': '1hF6jYFoX6fXCjO6YBlduDqku-9BBK_6jSQvsmmlaJDE',
         'source_sheet_tab': 'THCA',
         'target_sheet_name': 'Exotic Flowers Only BULK THCa Menu',
         'truncate_markers': [
@@ -34,13 +34,37 @@ MENU_CONFIGS = {
         'price_column': 7,  # Column index for price adjustments
         'category_column': 1,  # Column B for category detection
         'category_upcharge': {
-            'indoor exotics': 75,
-            'commercial ins': 150,
-            'high end deps': 100,
-            'standard deps': 100,
+            'exotic a+++': 75,  # Was 'indoor exotics'
+            'indoor exotics': 150,  # Was 'commercial ins'
+            'high end light assist': 100,  # Was 'high end deps'
+            'light assist': 'conditional',  # Was 'standard deps' - special pricing logic
+            'standard deps': 'conditional',  # Also maps to Light Assist
             'smalls': 125,
             'micros': 100,
             'partial pounds only left': 100,
+        },
+        'category_name_mapping': {
+            'indoor exotics': 'Exotic A+++',
+            'commercial ins': 'Indoor Exotics', 
+            'high end deps': 'High End Light Assist',
+            'standard deps': 'Light Assist',
+        },
+        'conditional_pricing': {
+            'light assist': {
+                'threshold': 450,
+                'under_threshold_price': 650,  # Set to $650 if under $450
+                'over_threshold_markup': 125    # Add $125 if over $450
+            },
+            'standard deps': {  # Same rules as light assist
+                'threshold': 450,
+                'under_threshold_price': 650,
+                'over_threshold_markup': 125
+            },
+            'indoor exotics': {  # Was commercial ins
+                'threshold': 850,
+                'under_threshold_markup': 150,  # Add $150 if under $850
+                'over_threshold_markup': 150    # Add $150 if over $850 (same either way)
+            }
         }
     },
     'titan': {
